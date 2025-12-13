@@ -9,6 +9,10 @@
 1.  挂在一个空节点上
 2.  移动这个节点就可以产生正常拖尾
 
+web runtime ![alt text](2025-12-14_014810.jpg)
+
+native runtime ![alt text](2025-12-14_014829.jpg)
+
 ## 特性
 
 - ✅ **跨平台支持** - Web 和 Native 双平台渲染正常

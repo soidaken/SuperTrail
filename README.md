@@ -2,7 +2,8 @@
 
 高性能 2D 拖尾组件，适用于 Cocos Creator 3.8.x
 
-一个基于 Cocos Creator 3.8.x 的 2D 拖尾组件，使用自定义 assembler 实现，完美和 2D 渲染组件合图合批。
+- 一个基于 Cocos Creator 3.8.x 的 2D 拖尾组件，使用自定义 assembler 实现，完美和 2D 渲染组件合图合批。
+- 这份渲染组件自定义 assembler 的过程是标准实现方法,其他有自定义渲染需求的可以使用这份代码作为模板去修改.
 
 有且只有一种使用方式:
 

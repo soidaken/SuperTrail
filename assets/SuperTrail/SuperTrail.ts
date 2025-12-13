@@ -13,6 +13,7 @@ import {
   macro,
   DynamicAtlasManager,
   Color,
+  Mat4,
 } from 'cc';
 import { JSB, MINIGAME } from 'cc/env';
 
@@ -185,6 +186,9 @@ export class SuperTrail extends UIRenderer {
   }
 
   private currentWorldPos = new Vec3();
+  // 用于世界坐标到局部坐标的转换
+  private _inverseWorldMatrix = new Mat4();
+  private _tempVec3 = new Vec3();
   protected update(dt: number): void {
     if (!this._spriteFrame?.texture) return;
 
@@ -328,9 +332,11 @@ export class SuperTrail extends UIRenderer {
       this._uvDirty = false;
     }
 
+    // 获取逆世界矩阵，用于将世界坐标转换为局部坐标
+    Mat4.invert(this._inverseWorldMatrix, this.node.worldMatrix);
     // 获取当前节点的世界坐标，用于计算相对位置
     // const nodeWorldPos = this.node.worldPosition;
-    const nodeWorldPos = this.currentWorldPos;
+    // const nodeWorldPos = this.currentWorldPos;
 
     // 在循环外预计算
     const tailAlphaNorm = this.tailAlpha / 255;
@@ -359,6 +365,9 @@ export class SuperTrail extends UIRenderer {
       uvIdx = 0,
       alphaIdx = 0,
       colorIdx = 0;
+
+    // 缓存逆矩阵元素，避免循环内重复访问
+    const im = this._inverseWorldMatrix;
 
     for (let i = 0; i < n; i++) {
       const p = this._getPoint(i);
@@ -393,10 +402,22 @@ export class SuperTrail extends UIRenderer {
       const wry = p.y - ny * halfW;
 
       // 关键：将世界坐标转换为相对于当前节点的局部坐标
-      const localLx = wlx - nodeWorldPos.x;
-      const localLy = wly - nodeWorldPos.y;
-      const localRx = wrx - nodeWorldPos.x;
-      const localRy = wry - nodeWorldPos.y;
+      // const localLx = wlx - nodeWorldPos.x;
+      // const localLy = wly - nodeWorldPos.y;
+      // const localRx = wrx - nodeWorldPos.x;
+      // const localRy = wry - nodeWorldPos.y;
+
+      //使用逆世界矩阵将世界坐标正确转换为局部坐标;
+      // 这样可以正确处理节点的旋转、缩放
+      let rhw = im.m03 * wlx + im.m07 * wly + im.m15;
+      rhw = rhw ? 1 / rhw : 1;
+      const localLx = (im.m00 * wlx + im.m04 * wly + im.m12) * rhw;
+      const localLy = (im.m01 * wlx + im.m05 * wly + im.m13) * rhw;
+
+      rhw = im.m03 * wrx + im.m07 * wry + im.m15;
+      rhw = rhw ? 1 / rhw : 1;
+      const localRx = (im.m00 * wrx + im.m04 * wry + im.m12) * rhw;
+      const localRy = (im.m01 * wrx + im.m05 * wry + im.m13) * rhw;
 
       //   this._positions.push(localLx, localLy, 0);
       //   this._positions.push(localRx, localRy, 0);

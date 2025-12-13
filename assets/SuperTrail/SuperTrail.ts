@@ -16,7 +16,7 @@ import {
 } from 'cc';
 import { JSB, MINIGAME } from 'cc/env';
 
-const { ccclass, property, menu } = _decorator;
+const { ccclass, property, menu, help } = _decorator;
 
 if (JSB || MINIGAME) {
   macro.CLEANUP_IMAGE_CACHE = false;
@@ -25,7 +25,7 @@ if (JSB || MINIGAME) {
 
 @ccclass
 @menu('SuperTrail')
-// @help('https://github.com/your-repo/SuperTrail')
+@help('https://github.com/soidaken/SuperTrail')
 export class SuperTrail extends UIRenderer {
   @property(SpriteFrame)
   private _spriteFrame: SpriteFrame = null!;

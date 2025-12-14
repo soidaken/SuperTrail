@@ -180,9 +180,52 @@ export class SuperTrail extends UIRenderer {
 
   public onEnable(): void {
     super.onEnable();
+
+    // 清空采样点状态
     this._pointHead = 0;
     this._pointCount = 0;
+    this._fadeAccum = 0;
+    this._hasNewPoint = false;
+
+    // 清空渲染数据缓存（与 onDisable 对应）
+    this._positions.length = 0;
+    this._uvs.length = 0;
+    this._indices.length = 0;
+    this._alphas.length = 0;
+    this._colors.length = 0;
+
+    //确保对象池已初始化
+    if (this._pointPool.length < this.maxPoints) {
+      this._initPointPool();
+    }
+
+    //重新刷新 assembler（会自动重建 renderData）
+    this._flushAssembler();
+
+    // 标记
     this.markForUpdateRenderData();
+  }
+
+  onDisable(): void {
+    super.onDisable();
+
+    // 清空状态（与 onEnable 对应）
+    this._pointHead = 0;
+    this._pointCount = 0;
+    this._fadeAccum = 0;
+    this._hasNewPoint = false;
+
+    // 清空渲染缓存
+    this._positions.length = 0;
+    this._uvs.length = 0;
+    this._indices.length = 0;
+    this._alphas.length = 0;
+    this._colors.length = 0;
+
+    // 销毁 renderData
+    if (this.renderData) {
+      this.destroyRenderData();
+    }
   }
 
   private currentWorldPos = new Vec3();
@@ -264,14 +307,26 @@ export class SuperTrail extends UIRenderer {
     }
   }
 
+  /** 有时候 避免出现跨越式的拖尾渲染 / 需要立即清空拖尾 / 对象池复用需要清空状态 */
   public clear(): void {
+    // 清空采样点
     this._pointHead = 0;
     this._pointCount = 0;
+
+    //重置衰减累积器，避免清空后立即触发衰减逻辑
+    this._fadeAccum = 0;
+
+    //重置新点标记
+    this._hasNewPoint = false;
+
+    // 清空渲染数据缓存
     this._positions.length = 0;
     this._uvs.length = 0;
     this._indices.length = 0;
     this._alphas.length = 0;
     this._colors.length = 0;
+
+    // 标记渲染数据需要更新
     if (this.renderData) {
       this.renderData.vertDirty = true;
     }

@@ -14,6 +14,7 @@ import {
   DynamicAtlasManager,
   Color,
   Mat4,
+  Enum,
 } from 'cc';
 import { JSB, MINIGAME } from 'cc/env';
 
@@ -22,12 +23,44 @@ const { ccclass, property, menu, help } = _decorator;
 if (JSB || MINIGAME) {
   macro.CLEANUP_IMAGE_CACHE = false;
   DynamicAtlasManager.instance.enabled = true;
+  console.log(`SuperTrail 在JSB 和 MINIGAME 环境下默认开启了[动态合图],如果你不需要,可以手动屏蔽.`);
+}
+
+const _fastInvSqrtBuffer = new ArrayBuffer(4);
+const _fastInvSqrtF32 = new Float32Array(_fastInvSqrtBuffer);
+const _fastInvSqrtI32 = new Int32Array(_fastInvSqrtBuffer);
+
+function fastInvSqrt(x: number): number {
+  const half = 0.5 * x;
+  _fastInvSqrtF32[0] = x;
+  _fastInvSqrtI32[0] = 0x5f3759df - (_fastInvSqrtI32[0] >> 1);
+  let y = _fastInvSqrtF32[0];
+  y = y * (1.5 - half * y * y);
+  return y;
+}
+
+/**
+ * 拖尾坐标模式
+ */
+enum TrailCoordinateMode {
+  /** 世界坐标模式：拖尾直接在世界坐标系渲染，不受父节点旋转/缩放影响，性能更好 */
+  World = 0,
+  /** 局部坐标模式：拖尾跟随节点变换，正确响应父节点的旋转和缩放 */
+  Local = 1,
 }
 
 @ccclass
 @menu('SuperTrail')
 @help('https://github.com/soidaken/SuperTrail')
 export class SuperTrail extends UIRenderer {
+  // 添加缓存变量
+  private _uvMin: number = 0;
+  private _uvMax: number = 1;
+  private _vMin: number = 0;
+  private _vMax: number = 1;
+  private _uvAreaH: number = 1;
+  private _uvDirty: boolean = true;
+
   @property(SpriteFrame)
   private _spriteFrame: SpriteFrame = null!;
   @property({
@@ -38,14 +71,6 @@ export class SuperTrail extends UIRenderer {
   get spriteFrame(): SpriteFrame {
     return this._spriteFrame;
   }
-
-  // 添加缓存变量
-  private _uvMin: number = 0;
-  private _uvMax: number = 1;
-  private _vMin: number = 0;
-  private _vMax: number = 1;
-  private _uvAreaH: number = 1;
-  private _uvDirty: boolean = true;
 
   set spriteFrame(value: SpriteFrame) {
     if (this._spriteFrame === value) return;
@@ -59,31 +84,89 @@ export class SuperTrail extends UIRenderer {
     this.markForUpdateRenderData();
   }
 
-  @property({ type: CCInteger, min: 4, tooltip: '最多保留多少个采样点（点越多越平滑，但更耗）' })
+  @property({
+    type: Enum(TrailCoordinateMode),
+    tooltip: '坐标模式：<br>World - 世界坐标，不受父节点旋转/缩放影响，性能更好<br>Local - 局部坐标，正确响应父节点变换',
+    displayName: '坐标模式',
+  })
+  public coordinateMode: TrailCoordinateMode = TrailCoordinateMode.World;
+
+  @property({
+    tooltip: '是否使用快速平方根计算（fastInvSqrt），提高性能(1000个拖尾10%提升),精度低一点但视觉效果基本不变',
+    displayName: '是否使用快速平方根',
+  })
+  public useFastSqrt = true;
+
+  @property({
+    type: CCInteger,
+    min: 4,
+    tooltip: '最多保留多少个采样点,和采样距离共同决定拖尾的长度',
+    displayName: '最大采样点数',
+  })
   public maxPoints = 20;
 
-  @property({ type: CCFloat, min: 0.1, tooltip: '两次采样点的最小距离（越大越省）' })
+  @property({
+    type: CCFloat,
+    min: 0.1,
+    tooltip: '两次采样点的最小距离,和最大采样点数共同决定拖尾的长度',
+    displayName: '最小采样距离',
+  })
   public minDistance = 3;
 
-  @property({ type: CCFloat, min: 0, tooltip: '头部宽度（最新点）' })
+  @property({
+    type: CCFloat,
+    min: 0,
+    tooltip: '头部宽度（最新点）',
+    displayName: '头部宽度',
+  })
   public headWidth = 32;
 
-  @property({ type: CCFloat, min: 0, tooltip: '尾部宽度（最旧点）' })
+  @property({
+    type: CCFloat,
+    min: 0,
+    tooltip: '尾部宽度（最旧点）',
+    displayName: '尾部宽度',
+  })
   public tailWidth = 0;
 
-  @property({ type: CCInteger, min: 0, max: 255, tooltip: '头部透明度（最新点）' })
+  @property({
+    type: CCInteger,
+    min: 0,
+    max: 255,
+    tooltip: '头部透明度（最新点）',
+    displayName: '头部透明度',
+  })
   public headAlpha = 255;
 
-  @property({ type: CCInteger, min: 0, max: 255, tooltip: '尾部透明度（最旧点）' })
+  @property({
+    type: CCInteger,
+    min: 0,
+    max: 255,
+    tooltip: '尾部透明度（最旧点）',
+    displayName: '尾部透明度',
+  })
   public tailAlpha = 0;
 
-  @property({ type: CCFloat, min: 0, tooltip: '停止移动后拖尾完全消失所需时间（秒），0表示不自动衰减' })
+  @property({
+    type: CCFloat,
+    min: 0,
+    tooltip: '停止移动后拖尾完全消失所需时间（秒），0表示不自动衰减',
+    displayName: '衰减时间',
+  })
   public fadeTime = 0.1;
 
-  @property({ type: Color, tooltip: '头部颜色（最新点）' })
+  @property({
+    type: Color,
+    tooltip: '头部颜色（最新点）',
+    displayName: '头部颜色',
+  })
   public headColor: Color = new Color(255, 255, 255, 255);
 
-  @property({ type: Color, tooltip: '尾部颜色（最旧点）' })
+  @property({
+    type: Color,
+    tooltip: '尾部颜色（最旧点）',
+    displayName: '尾部颜色',
+  })
   public tailColor: Color = new Color(255, 255, 255, 255);
 
   // 是否暂停采样
@@ -387,11 +470,13 @@ export class SuperTrail extends UIRenderer {
       this._uvDirty = false;
     }
 
-    // 获取逆世界矩阵，用于将世界坐标转换为局部坐标
-    Mat4.invert(this._inverseWorldMatrix, this.node.worldMatrix);
-    // 获取当前节点的世界坐标，用于计算相对位置
-    // const nodeWorldPos = this.node.worldPosition;
-    // const nodeWorldPos = this.currentWorldPos;
+    // 根据坐标模式决定是否需要逆矩阵
+    const useLocalMode = this.coordinateMode === TrailCoordinateMode.Local;
+    let im: Mat4 | null = null;
+    if (useLocalMode) {
+      Mat4.invert(this._inverseWorldMatrix, this.node.worldMatrix);
+      im = this._inverseWorldMatrix;
+    }
 
     // 在循环外预计算
     const tailAlphaNorm = this.tailAlpha / 255;
@@ -421,9 +506,6 @@ export class SuperTrail extends UIRenderer {
       alphaIdx = 0,
       colorIdx = 0;
 
-    // 缓存逆矩阵元素，避免循环内重复访问
-    const im = this._inverseWorldMatrix;
-
     for (let i = 0; i < n; i++) {
       const p = this._getPoint(i);
       const pPrev = this._getPoint(i > 0 ? i - 1 : i);
@@ -432,11 +514,19 @@ export class SuperTrail extends UIRenderer {
       // 计算切线方向
       let dx = pNext.x - pPrev.x;
       let dy = pNext.y - pPrev.y;
-      //   const len = Math.hypot(dx, dy) || 1;
       const lenSq = dx * dx + dy * dy;
-      const len = lenSq > 0.0001 ? Math.sqrt(lenSq) : 1;
-      dx /= len;
-      dy /= len;
+
+      if (this.useFastSqrt) {
+        if (lenSq > 0.0001) {
+          const invLen = fastInvSqrt(lenSq);
+          dx *= invLen;
+          dy *= invLen;
+        }
+      } else {
+        const len = lenSq > 0.0001 ? Math.sqrt(lenSq) : 1;
+        dx /= len;
+        dy /= len;
+      }
 
       // 法线方向（垂直于切线）
       const nx = -dy;
@@ -450,32 +540,35 @@ export class SuperTrail extends UIRenderer {
       const r = tailColorR + (headColorR - tailColorR) * t;
       const g = tailColorG + (headColorG - tailColorG) * t;
       const b = tailColorB + (headColorB - tailColorB) * t;
+
       // 左右两个顶点的世界坐标
       const wlx = p.x + nx * halfW;
       const wly = p.y + ny * halfW;
       const wrx = p.x - nx * halfW;
       const wry = p.y - ny * halfW;
 
-      // 关键：将世界坐标转换为相对于当前节点的局部坐标
-      // const localLx = wlx - nodeWorldPos.x;
-      // const localLy = wly - nodeWorldPos.y;
-      // const localRx = wrx - nodeWorldPos.x;
-      // const localRy = wry - nodeWorldPos.y;
+      let localLx: number, localLy: number, localRx: number, localRy: number;
 
-      //使用逆世界矩阵将世界坐标正确转换为局部坐标;
-      // 这样可以正确处理节点的旋转、缩放
-      let rhw = im.m03 * wlx + im.m07 * wly + im.m15;
-      rhw = rhw ? 1 / rhw : 1;
-      const localLx = (im.m00 * wlx + im.m04 * wly + im.m12) * rhw;
-      const localLy = (im.m01 * wlx + im.m05 * wly + im.m13) * rhw;
+      if (useLocalMode && im) {
+        // 局部坐标模式：使用逆世界矩阵将世界坐标转换为局部坐标
+        // 这样可以正确处理节点的旋转、缩放
+        let rhw = im.m03 * wlx + im.m07 * wly + im.m15;
+        rhw = rhw ? 1 / rhw : 1;
+        localLx = (im.m00 * wlx + im.m04 * wly + im.m12) * rhw;
+        localLy = (im.m01 * wlx + im.m05 * wly + im.m13) * rhw;
 
-      rhw = im.m03 * wrx + im.m07 * wry + im.m15;
-      rhw = rhw ? 1 / rhw : 1;
-      const localRx = (im.m00 * wrx + im.m04 * wry + im.m12) * rhw;
-      const localRy = (im.m01 * wrx + im.m05 * wry + im.m13) * rhw;
+        rhw = im.m03 * wrx + im.m07 * wry + im.m15;
+        rhw = rhw ? 1 / rhw : 1;
+        localRx = (im.m00 * wrx + im.m04 * wry + im.m12) * rhw;
+        localRy = (im.m01 * wrx + im.m05 * wry + im.m13) * rhw;
+      } else {
+        // 世界坐标模式：直接使用世界坐标，不进行坐标转换
+        localLx = wlx;
+        localLy = wly;
+        localRx = wrx;
+        localRy = wry;
+      }
 
-      //   this._positions.push(localLx, localLy, 0);
-      //   this._positions.push(localRx, localRy, 0);
       this._positions[posIdx++] = localLx;
       this._positions[posIdx++] = localLy;
       this._positions[posIdx++] = 0;
@@ -486,22 +579,16 @@ export class SuperTrail extends UIRenderer {
 
       // UV坐标：沿着拖尾方向从尾到头
       const vV = this._vMin + this._uvAreaH * (1 - t);
-      //   this._uvs.push(this._uvMin, vV); // 左顶点
-      //   this._uvs.push(this._uvMax, vV); // 右顶点
       this._uvs[uvIdx++] = this._uvMin;
       this._uvs[uvIdx++] = vV;
       this._uvs[uvIdx++] = this._uvMax;
       this._uvs[uvIdx++] = vV;
 
       // 存储每个顶点的透明度
-      //   this._alphas.push(alpha);
-      //   this._alphas.push(alpha);
       this._alphas[alphaIdx++] = alpha;
       this._alphas[alphaIdx++] = alpha;
 
-      //存储每个顶点的颜色;
-      //   this._colors.push(r, g, b);
-      //   this._colors.push(r, g, b);
+      // 存储每个顶点的颜色
       this._colors[colorIdx++] = r;
       this._colors[colorIdx++] = g;
       this._colors[colorIdx++] = b;
@@ -510,22 +597,16 @@ export class SuperTrail extends UIRenderer {
       this._colors[colorIdx++] = b;
     }
 
-    // 数组长度已在开始时设置，无需再次调整
-    // this._positions.length = posIdx;
-    // this._uvs.length = uvIdx;
-    // this._alphas.length = alphaIdx;
-    // this._colors.length = colorIdx;
-
     // 生成索引：每两个相邻的点构成一个四边形（两个三角形）
-    const indexCount = (n - 1) * 6; // 每个四边形 2 个三角形 * 3 个顶点
+    const indexCount = (n - 1) * 6;
     this._indices.length = indexCount;
     let indexIdx = 0;
     for (let i = 0; i < n - 1; i++) {
-      const v0 = i * 2;
-      const v1 = i * 2 + 1;
-      const v2 = i * 2 + 2;
-      const v3 = i * 2 + 3;
-
+      const start = i * 2;
+      const v0 = start;
+      const v1 = start + 1;
+      const v2 = start + 2;
+      const v3 = start + 3;
       this._indices[indexIdx++] = v0;
       this._indices[indexIdx++] = v1;
       this._indices[indexIdx++] = v2;
@@ -534,7 +615,6 @@ export class SuperTrail extends UIRenderer {
       this._indices[indexIdx++] = v3;
     }
   }
-
   protected _canRender(): boolean {
     if (!super._canRender()) return false;
     if (!this._spriteFrame || !this._spriteFrame.texture) return false;
@@ -688,38 +768,60 @@ class SuperTrailAssemblerImpl implements IAssembler {
 
     const chunk = renderData.chunk;
     const vb = chunk.vb;
-    const m = comp.node.worldMatrix;
     const stride = renderData.floatStride;
 
-    const baseColor = comp.color;
-    const colorR = baseColor.r / 255;
-    const colorG = baseColor.g / 255;
-    const colorB = baseColor.b / 255;
+    // 根据坐标模式决定是否应用世界矩阵变换
+    const useLocalMode = comp.coordinateMode === TrailCoordinateMode.Local;
 
-    for (let i = 0; i < vertCount; ++i) {
-      const posIdx = i * 3;
-      const uvIdx = i * 2;
-      const colorIdx = i * 3;
+    if (useLocalMode) {
+      // 局部坐标模式：应用世界矩阵变换
+      const m = comp.node.worldMatrix;
+      for (let i = 0; i < vertCount; ++i) {
+        const posIdx = i * 3;
+        const uvIdx = i * 2;
+        const colorIdx = i * 3;
 
-      const x = comp.positions[posIdx];
-      const y = comp.positions[posIdx + 1];
+        const x = comp.positions[posIdx];
+        const y = comp.positions[posIdx + 1];
 
-      let rhw = m.m03 * x + m.m07 * y + m.m15;
-      rhw = rhw ? 1 / rhw : 1;
+        let rhw = m.m03 * x + m.m07 * y + m.m15;
+        rhw = rhw ? 1 / rhw : 1;
 
-      const offset = i * stride;
-      vb[offset + 0] = (m.m00 * x + m.m04 * y + m.m12) * rhw;
-      vb[offset + 1] = (m.m01 * x + m.m05 * y + m.m13) * rhw;
-      vb[offset + 2] = (m.m02 * x + m.m06 * y + m.m14) * rhw;
-      vb[offset + 3] = comp.uvs[uvIdx];
-      vb[offset + 4] = comp.uvs[uvIdx + 1];
-      vb[offset + 5] = comp.colors[colorIdx]; // r
-      vb[offset + 6] = comp.colors[colorIdx + 1]; // g
-      vb[offset + 7] = comp.colors[colorIdx + 2]; // b
-      vb[offset + 8] = comp.alphas[i]; // a
+        const offset = i * stride;
+        vb[offset + 0] = (m.m00 * x + m.m04 * y + m.m12) * rhw;
+        vb[offset + 1] = (m.m01 * x + m.m05 * y + m.m13) * rhw;
+        vb[offset + 2] = (m.m02 * x + m.m06 * y + m.m14) * rhw;
+        vb[offset + 3] = comp.uvs[uvIdx];
+        vb[offset + 4] = comp.uvs[uvIdx + 1];
+        vb[offset + 5] = comp.colors[colorIdx];
+        vb[offset + 6] = comp.colors[colorIdx + 1];
+        vb[offset + 7] = comp.colors[colorIdx + 2];
+        vb[offset + 8] = comp.alphas[i];
+      }
+    } else {
+      // 世界坐标模式：直接使用世界坐标
+      for (let i = 0; i < vertCount; ++i) {
+        const posIdx = i * 3;
+        const uvIdx = i * 2;
+        const colorIdx = i * 3;
+
+        const x = comp.positions[posIdx];
+        const y = comp.positions[posIdx + 1];
+        const z = comp.positions[posIdx + 2];
+
+        const offset = i * stride;
+        vb[offset + 0] = x;
+        vb[offset + 1] = y;
+        vb[offset + 2] = z;
+        vb[offset + 3] = comp.uvs[uvIdx];
+        vb[offset + 4] = comp.uvs[uvIdx + 1];
+        vb[offset + 5] = comp.colors[colorIdx];
+        vb[offset + 6] = comp.colors[colorIdx + 1];
+        vb[offset + 7] = comp.colors[colorIdx + 2];
+        vb[offset + 8] = comp.alphas[i];
+      }
     }
   }
-
   private _updateJustUV(comp: SuperTrail): void {
     const renderData = comp.renderData;
     if (!renderData) return;

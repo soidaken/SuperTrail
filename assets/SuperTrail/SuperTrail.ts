@@ -156,14 +156,12 @@ export class SuperTrail extends UIRenderer {
   public fadeTime = 0.1;
 
   @property({
-    type: Color,
     tooltip: '头部颜色（最新点）',
     displayName: '头部颜色',
   })
   public headColor: Color = new Color(255, 255, 255, 255);
 
   @property({
-    type: Color,
     tooltip: '尾部颜色（最旧点）',
     displayName: '尾部颜色',
   })

@@ -18,7 +18,7 @@ import {
 } from 'cc';
 import { JSB, MINIGAME } from 'cc/env';
 
-const { ccclass, property, menu, help } = _decorator;
+const { ccclass, property, menu, help, executeInEditMode } = _decorator;
 
 if (JSB || MINIGAME) {
   macro.CLEANUP_IMAGE_CACHE = false;
@@ -42,7 +42,7 @@ function fastInvSqrt(x: number): number {
 /**
  * 拖尾坐标模式
  */
-enum TrailCoordinateMode {
+export enum TrailCoordinateMode {
   /** 世界坐标模式：拖尾直接在世界坐标系渲染，不受父节点旋转/缩放影响，性能更好 */
   World = 0,
   /** 局部坐标模式：拖尾跟随节点变换，正确响应父节点的旋转和缩放 */
@@ -51,6 +51,7 @@ enum TrailCoordinateMode {
 
 @ccclass
 @menu('SuperTrail')
+@executeInEditMode
 @help('https://github.com/soidaken/SuperTrail')
 export class SuperTrail extends UIRenderer {
   // 添加缓存变量
@@ -189,6 +190,10 @@ export class SuperTrail extends UIRenderer {
   // 环形缓冲区：当前有效点数量
   private _pointCount: number = 0;
 
+  // JSB + World：用于检测 node.worldMatrix 是否变化（变化则需要每帧重算抵消后的顶点）
+  private _jsbWorld_lastMat: Mat4 = new Mat4();
+  private _jsbWorld_hasLastMat = false;
+
   get positions(): number[] {
     return this._positions;
   }
@@ -285,6 +290,9 @@ export class SuperTrail extends UIRenderer {
 
     // 标记
     this.markForUpdateRenderData();
+
+    // reset matrix cache
+    this._jsbWorld_hasLastMat = false; // [变更#3] reset
   }
 
   onDisable(): void {
@@ -307,12 +315,17 @@ export class SuperTrail extends UIRenderer {
     if (this.renderData) {
       this.destroyRenderData();
     }
+
+    // reset matrix cache
+    this._jsbWorld_hasLastMat = false; // [变更#3] reset
   }
 
   private currentWorldPos = new Vec3();
   // 用于世界坐标到局部坐标的转换
-  private _inverseWorldMatrix = new Mat4();
   private _tempVec3 = new Vec3();
+  // 用于父节点逆矩阵
+  private _inverseParentMatrix = new Mat4();
+
   protected update(dt: number): void {
     if (!this._spriteFrame?.texture) return;
 
@@ -324,19 +337,37 @@ export class SuperTrail extends UIRenderer {
     // 自动采样节点位置
     if (!this._paused) {
       const wp = this.node.getWorldPosition(this.currentWorldPos);
+
+      // 根据坐标模式决定存储的坐标类型
+      let storeX: number, storeY: number, storeZ: number;
+
+      if (this.coordinateMode === TrailCoordinateMode.Local && this.node.parent) {
+        // Local 模式：存储相对于父节点的局部坐标
+        Mat4.invert(this._inverseParentMatrix, this.node.parent.worldMatrix);
+        Vec3.transformMat4(this._tempVec3, wp, this._inverseParentMatrix);
+        storeX = this._tempVec3.x;
+        storeY = this._tempVec3.y;
+        storeZ = this._tempVec3.z;
+      } else {
+        // World 模式：存储世界坐标
+        storeX = wp.x;
+        storeY = wp.y;
+        storeZ = wp.z;
+      }
+
       const last = this._getLastPoint();
 
       this._hasNewPoint = false;
 
       if (last) {
-        const dx = wp.x - last.x;
-        const dy = wp.y - last.y;
+        const dx = storeX - last.x;
+        const dy = storeY - last.y;
         if (dx * dx + dy * dy >= this.minDistance * this.minDistance) {
-          this._addPoint(wp.x, wp.y, wp.z);
+          this._addPoint(storeX, storeY, storeZ);
           this._hasNewPoint = true;
         }
       } else {
-        this._addPoint(wp.x, wp.y, wp.z);
+        this._addPoint(storeX, storeY, storeZ);
         this._hasNewPoint = true;
       }
     } else {
@@ -379,6 +410,36 @@ export class SuperTrail extends UIRenderer {
       dataChanged = true; // 清空数据也是一种变化
     }
 
+    // 自动衰减/新增点逻辑计算完后，追加：JSB + World 下检测矩阵变化
+    // 目的：父节点旋转/缩放导致 node.worldMatrix 变化时，即使没有新点，也必须刷新抵消后的顶点，否则会“隔几帧抖一下”
+    if (JSB && this.coordinateMode === TrailCoordinateMode.World && this._pointCount >= 2) {
+      // 尽量保证拿到的是当前帧最新矩阵
+      (this.node as any).updateWorldTransform?.();
+      const m = this.node.worldMatrix;
+
+      // 只比较关键分量（2D + 平移），足够判断是否发生影响渲染的变化
+      const last = this._jsbWorld_lastMat;
+      const changed =
+        !this._jsbWorld_hasLastMat ||
+        m.m00 !== last.m00 ||
+        m.m01 !== last.m01 ||
+        m.m04 !== last.m04 ||
+        m.m05 !== last.m05 ||
+        m.m12 !== last.m12 ||
+        m.m13 !== last.m13;
+
+      if (changed) {
+        this._jsbWorld_hasLastMat = true;
+        last.m00 = m.m00;
+        last.m01 = m.m01;
+        last.m04 = m.m04;
+        last.m05 = m.m05;
+        last.m12 = m.m12;
+        last.m13 = m.m13;
+        dataChanged = true; // 强制刷新，消灭“偶尔同步一下”的抖动
+      }
+    }
+
     // 只有在数据真正变化时才标记为 dirty
     if (dataChanged) {
       if (this.renderData) {
@@ -412,6 +473,8 @@ export class SuperTrail extends UIRenderer {
       this.renderData.vertDirty = true;
     }
     this.markForUpdateRenderData();
+
+    this._jsbWorld_hasLastMat = false; // [变更#3] reset
   }
 
   /**
@@ -468,14 +531,6 @@ export class SuperTrail extends UIRenderer {
       this._uvDirty = false;
     }
 
-    // 根据坐标模式决定是否需要逆矩阵
-    const useLocalMode = this.coordinateMode === TrailCoordinateMode.Local;
-    let im: Mat4 | null = null;
-    if (useLocalMode) {
-      Mat4.invert(this._inverseWorldMatrix, this.node.worldMatrix);
-      im = this._inverseWorldMatrix;
-    }
-
     // 在循环外预计算
     const tailAlphaNorm = this.tailAlpha / 255;
     const headAlphaNorm = this.headAlpha / 255;
@@ -509,7 +564,7 @@ export class SuperTrail extends UIRenderer {
       const pPrev = this._getPoint(i > 0 ? i - 1 : i);
       const pNext = this._getPoint(i < n - 1 ? i + 1 : i);
 
-      // 计算切线方向
+      // 计算切线方向（在存储的坐标系中计算）
       let dx = pNext.x - pPrev.x;
       let dy = pNext.y - pPrev.y;
       const lenSq = dx * dx + dy * dy;
@@ -539,40 +594,21 @@ export class SuperTrail extends UIRenderer {
       const g = tailColorG + (headColorG - tailColorG) * t;
       const b = tailColorB + (headColorB - tailColorB) * t;
 
-      // 左右两个顶点的世界坐标
-      const wlx = p.x + nx * halfW;
-      const wly = p.y + ny * halfW;
-      const wrx = p.x - nx * halfW;
-      const wry = p.y - ny * halfW;
+      // 左右两个顶点（在存储的坐标系中）
+      const lx = p.x + nx * halfW;
+      const ly = p.y + ny * halfW;
+      const rx = p.x - nx * halfW;
+      const ry = p.y - ny * halfW;
 
-      let localLx: number, localLy: number, localRx: number, localRy: number;
-
-      if (useLocalMode && im) {
-        // 局部坐标模式：使用逆世界矩阵将世界坐标转换为局部坐标
-        // 这样可以正确处理节点的旋转、缩放
-        let rhw = im.m03 * wlx + im.m07 * wly + im.m15;
-        rhw = rhw ? 1 / rhw : 1;
-        localLx = (im.m00 * wlx + im.m04 * wly + im.m12) * rhw;
-        localLy = (im.m01 * wlx + im.m05 * wly + im.m13) * rhw;
-
-        rhw = im.m03 * wrx + im.m07 * wry + im.m15;
-        rhw = rhw ? 1 / rhw : 1;
-        localRx = (im.m00 * wrx + im.m04 * wry + im.m12) * rhw;
-        localRy = (im.m01 * wrx + im.m05 * wry + im.m13) * rhw;
-      } else {
-        // 世界坐标模式：直接使用世界坐标，不进行坐标转换
-        localLx = wlx;
-        localLy = wly;
-        localRx = wrx;
-        localRy = wry;
-      }
-
-      this._positions[posIdx++] = localLx;
-      this._positions[posIdx++] = localLy;
+      // Local 模式：存储的是局部坐标，直接使用
+      // World 模式：存储的是世界坐标，直接使用
+      // fillBuffers 会根据模式决定是否应用世界矩阵变换
+      this._positions[posIdx++] = lx;
+      this._positions[posIdx++] = ly;
       this._positions[posIdx++] = 0;
 
-      this._positions[posIdx++] = localRx;
-      this._positions[posIdx++] = localRy;
+      this._positions[posIdx++] = rx;
+      this._positions[posIdx++] = ry;
       this._positions[posIdx++] = 0;
 
       // UV坐标：沿着拖尾方向从尾到头
@@ -652,6 +688,20 @@ class SuperTrailAssemblerImpl implements IAssembler {
     return renderData;
   }
 
+  // [变更#1] JSB(World) 需要：world -> nodeLocal 的逆矩阵缓存
+  private _tmpInvNodeWorld: Mat4 = new Mat4();
+
+  private _isJSBWorld(comp: SuperTrail): boolean {
+    return JSB && comp.coordinateMode === TrailCoordinateMode.World;
+  }
+
+  private _ensureInvNodeWorld(comp: SuperTrail): Mat4 {
+    // 关键：尽量在渲染阶段刷新一次 transform，减少时序差
+    (comp.node as any).updateWorldTransform?.();
+    Mat4.invert(this._tmpInvNodeWorld, comp.node.worldMatrix);
+    return this._tmpInvNodeWorld;
+  }
+
   updateRenderData(comp: SuperTrail): void {
     if (!comp) return;
     if (!comp.spriteFrame?.texture) return;
@@ -672,14 +722,28 @@ class SuperTrailAssemblerImpl implements IAssembler {
     }
 
     const dataList: IRenderData[] = renderData.data;
+
+    const jsbWorld = this._isJSBWorld(comp);
+    const inv = jsbWorld ? this._ensureInvNodeWorld(comp) : null;
+
     for (let i = 0; i < vertCount; ++i) {
       const item = dataList[i];
-      item.x = comp.positions[i * 3];
-      item.y = comp.positions[i * 3 + 1];
+
+      const wx = comp.positions[i * 3];
+      const wy = comp.positions[i * 3 + 1];
+
+      if (inv) {
+        let rhw = inv.m03 * wx + inv.m07 * wy + inv.m15;
+        rhw = rhw ? 1 / rhw : 1;
+        item.x = (inv.m00 * wx + inv.m04 * wy + inv.m12) * rhw;
+        item.y = (inv.m01 * wx + inv.m05 * wy + inv.m13) * rhw;
+      } else {
+        item.x = wx;
+        item.y = wy;
+      }
     }
 
     if (renderData.vertexCount !== vertCount || renderData.indexCount !== indexCount) {
-      // comp.renderEntity.colorDirty = true;
       renderData.resize(vertCount, indexCount);
     }
 
@@ -768,12 +832,11 @@ class SuperTrailAssemblerImpl implements IAssembler {
     const vb = chunk.vb;
     const stride = renderData.floatStride;
 
-    // 根据坐标模式决定是否应用世界矩阵变换
     const useLocalMode = comp.coordinateMode === TrailCoordinateMode.Local;
 
-    if (useLocalMode) {
-      // 局部坐标模式：应用世界矩阵变换
-      const m = comp.node.worldMatrix;
+    if (useLocalMode && comp.node.parent) {
+      // 局部坐标模式：positions 是相对于父节点的局部坐标，需要用父节点的世界矩阵变换
+      const m = comp.node.parent.worldMatrix;
       for (let i = 0; i < vertCount; ++i) {
         const posIdx = i * 3;
         const uvIdx = i * 2;
@@ -797,15 +860,32 @@ class SuperTrailAssemblerImpl implements IAssembler {
         vb[offset + 8] = comp.alphas[i];
       }
     } else {
-      // 世界坐标模式：直接使用世界坐标
+      // World 模式：
+      // - Web：positions 就是 world，直接写 vb
+      // - JSB：写 nodeLocal（用 inv(node.worldMatrix) 抵消后续乘法），避免整体跟随 + 抖动
+      const jsbWorld = this._isJSBWorld(comp);
+      const inv = jsbWorld ? this._ensureInvNodeWorld(comp) : null;
+
       for (let i = 0; i < vertCount; ++i) {
         const posIdx = i * 3;
         const uvIdx = i * 2;
         const colorIdx = i * 3;
 
-        const x = comp.positions[posIdx];
-        const y = comp.positions[posIdx + 1];
-        const z = comp.positions[posIdx + 2];
+        const wx = comp.positions[posIdx];
+        const wy = comp.positions[posIdx + 1];
+        const wz = comp.positions[posIdx + 2];
+
+        let x = wx,
+          y = wy,
+          z = wz;
+
+        if (inv) {
+          let rhw = inv.m03 * wx + inv.m07 * wy + inv.m11 * wz + inv.m15;
+          rhw = rhw ? 1 / rhw : 1;
+          x = (inv.m00 * wx + inv.m04 * wy + inv.m08 * wz + inv.m12) * rhw;
+          y = (inv.m01 * wx + inv.m05 * wy + inv.m09 * wz + inv.m13) * rhw;
+          z = (inv.m02 * wx + inv.m06 * wy + inv.m10 * wz + inv.m14) * rhw;
+        }
 
         const offset = i * stride;
         vb[offset + 0] = x;
@@ -820,6 +900,7 @@ class SuperTrailAssemblerImpl implements IAssembler {
       }
     }
   }
+
   private _updateJustUV(comp: SuperTrail): void {
     const renderData = comp.renderData;
     if (!renderData) return;
@@ -840,17 +921,34 @@ class SuperTrailAssemblerImpl implements IAssembler {
     const vb = chunk.vb;
     const stride = renderData.floatStride;
 
+    // 关键：JSB + World 时，也同步写 position，避免只更新 uv/color/alpha 导致的“旧 position 帧”抖动
+    const jsbWorld = this._isJSBWorld(comp);
+    const inv = jsbWorld ? this._ensureInvNodeWorld(comp) : null;
+
     for (let i = 0; i < vertCount; ++i) {
       const offset = i * stride;
       const uvIdx = i * 2;
       const colorIdx = i * 3;
 
+      if (inv) {
+        const wx = comp.positions[i * 3];
+        const wy = comp.positions[i * 3 + 1];
+        const wz = comp.positions[i * 3 + 2];
+
+        let rhw = inv.m03 * wx + inv.m07 * wy + inv.m11 * wz + inv.m15;
+        rhw = rhw ? 1 / rhw : 1;
+
+        vb[offset + 0] = (inv.m00 * wx + inv.m04 * wy + inv.m08 * wz + inv.m12) * rhw;
+        vb[offset + 1] = (inv.m01 * wx + inv.m05 * wy + inv.m09 * wz + inv.m13) * rhw;
+        vb[offset + 2] = (inv.m02 * wx + inv.m06 * wy + inv.m10 * wz + inv.m14) * rhw;
+      }
+
       vb[offset + 3] = comp.uvs[uvIdx];
       vb[offset + 4] = comp.uvs[uvIdx + 1];
-      vb[offset + 5] = comp.colors[colorIdx]; // r
-      vb[offset + 6] = comp.colors[colorIdx + 1]; // g
-      vb[offset + 7] = comp.colors[colorIdx + 2]; // b
-      vb[offset + 8] = comp.alphas[i]; // a
+      vb[offset + 5] = comp.colors[colorIdx];
+      vb[offset + 6] = comp.colors[colorIdx + 1];
+      vb[offset + 7] = comp.colors[colorIdx + 2];
+      vb[offset + 8] = comp.alphas[i];
     }
   }
 
